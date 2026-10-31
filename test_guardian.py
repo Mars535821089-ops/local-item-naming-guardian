@@ -6,6 +6,9 @@ class Safety(unittest.TestCase):
  def test_permission_gap_suppresses_false_removal(self):
   scan=g.Scan();scan.coverage=[{'source':'privacy','status':'不可读取'}]
   self.assertEqual(g.reconcile(scan,{'x':{'kind':'隐私权限','name':'x','path':'/x'}},{}),[])
+ def test_permission_baseline_is_per_database(self):
+  events=[{'kind':'新增','key':'隐私权限:/system/db:service:app'},{'kind':'新增','key':'隐私权限:/user/db:service:app'}]
+  self.assertEqual(g.permission_baselines(events,[{'source':'隐私权限 /user/db','status':'不可读取'}]),[events[1]])
  def test_identity_change_does_not_inherit_purpose(self):
   a={'name':'node','path':'/x','identity':'old'};b={**a,'identity':'new'};s=g.Scan();s.rows={'x':b}
   events=g.reconcile(s,{'x':a},{'x':{'baseline':a,'purpose':'known'}})

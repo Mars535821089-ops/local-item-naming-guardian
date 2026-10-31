@@ -177,6 +177,16 @@ def report(base,state,rules):
     body+='''<script>document.getElementById('q').oninput=function(){for(const r of document.querySelectorAll('tbody tr'))r.hidden=!r.textContent.toLowerCase().includes(this.value.toLowerCase())}</script>'''
     atomic(base/'项目用途看板.html',body.encode())
 
+def permission_baselines(events,coverage):
+    prefixes=[]
+    for c in coverage:
+        if c.get('status')=='ok': continue
+        source=c.get('source','')
+        if source=='后台注册': prefixes.append('后台注册:')
+        elif source.startswith('隐私权限 '): prefixes.append('隐私权限:'+source[len('隐私权限 '):]+':')
+        elif source.endswith('com.apple.controlcenter.plist'): prefixes.append('设置存储变更:'+source)
+    return [e for e in events if e['kind']=='新增' and any(e['key'].startswith(p) for p in prefixes)]
+
 def scan_once(base):
     base.mkdir(parents=True,exist_ok=True)
     with open(base/'scan.lock','a') as lock:
@@ -188,11 +198,7 @@ def scan_once(base):
         # Newly readable protected records after permission changes establish a baseline.
         previous_coverage=read(base/'coverage.json',[])
         gaps=[c.get('source','') for c in previous_coverage if c.get('status')!='ok']
-        affected=set()
-        if any('后台注册' in c for c in gaps): affected.add('后台注册')
-        if any(c.startswith('隐私权限 ') for c in gaps): affected.add('隐私权限')
-        if any('com.apple.controlcenter.plist' in c for c in gaps): affected.add('设置存储变更')
-        baseline_events=[e for e in events if e['kind']=='新增' and e['key'].split(':',1)[0] in affected]
+        baseline_events=permission_baselines(events,previous_coverage)
         if baseline_events:
             save(base/'permission-baseline.json',{'at':stamp(),'reason':'Previously unreadable source; not evidence of installation','events':baseline_events})
             events=[e for e in events if e not in baseline_events]
