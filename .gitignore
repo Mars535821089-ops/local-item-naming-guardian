@@ -1,0 +1,13 @@
+__pycache__/
+*.pyc
+.DS_Store
+/build/
+/launcher
+/系统维护-命名管家-核查新增项目并记录用途
+*.log
+.env*
+state.json
+rules.json
+coverage.json
+待核查.json
+*.html
