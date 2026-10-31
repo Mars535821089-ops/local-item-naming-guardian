@@ -185,6 +185,17 @@ def scan_once(base):
         old=read(base/'state.json',{}); rules=read(base/'rules.json',{})
         scan=Scan().run(); state={'at':stamp(),'items':scan.rows}
         events=reconcile(scan,old.get('items',{}),rules) if old else []
+        # Newly readable protected records after permission changes establish a baseline.
+        previous_coverage=read(base/'coverage.json',[])
+        gaps=[c.get('source','') for c in previous_coverage if c.get('status')!='ok']
+        affected=set()
+        if any('后台注册' in c for c in gaps): affected.add('后台注册')
+        if any(c.startswith('隐私权限 ') for c in gaps): affected.add('隐私权限')
+        if any('com.apple.controlcenter.plist' in c for c in gaps): affected.add('设置存储变更')
+        baseline_events=[e for e in events if e['kind']=='新增' and e['key'].split(':',1)[0] in affected]
+        if baseline_events:
+            save(base/'permission-baseline.json',{'at':stamp(),'reason':'Previously unreadable source; not evidence of installation','events':baseline_events})
+            events=[e for e in events if e not in baseline_events]
         inbox=read(base/'待核查.json',{})
         for e in events:
             key=digest(json.dumps(e,sort_keys=True,ensure_ascii=False).encode())
