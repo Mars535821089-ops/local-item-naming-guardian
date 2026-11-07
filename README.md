@@ -79,7 +79,7 @@ launchctl bootout "gui/$(id -u)/com.mars.item-naming-guardian"
 
 ## 测试
 
-`make test` 当前包含 43 项测试，覆盖身份变化保护、自动恢复命名、离线来源、未知任务保留、并发更新器独占提交、真实子进程中断后的事务恢复、并发规则登记、畸形声明隔离、禁用和运行状态变化保护、扩展属性保留、HTML 转义、原始目标与自引用保护。自动测试不加载业务任务、不改系统权限；额外本机验收使用独立临时服务验证后台自动执行和空闲任务不重复执行，验收后移除测试服务。
+`make test` 当前包含 47 项测试，覆盖身份变化保护、自动恢复命名、离线来源、未知任务保留、并发更新器独占提交、真实子进程中断后的事务恢复、并发规则登记、畸形声明隔离、禁用和运行状态变化保护、扩展属性保留、HTML 转义、原始目标与自引用保护，以及显式换版的签名包装器、幂等和故障回滚。自动测试不加载业务任务、不改系统权限；额外本机验收使用独立临时服务验证后台自动执行和空闲任务不重复执行，验收后移除测试服务。
 
 仓库仅发布源码、构建脚本、测试和说明。本机实际用途规则、程序清单、权限记录、变更记录和验收快照不纳入 Git。
 
@@ -96,6 +96,17 @@ launchctl bootout "gui/$(id -u)/com.mars.item-naming-guardian"
 ```
 
 登记记录保存于私有 `normalization/rules.json`。证据变化会保护跳过，不自动扩大原有批准。`automatic-naming.json` 区分“启动配置已规范”和“系统后台显示已核验”，不能以文件修改代替设置显示验收。
+
+已登记服务的可验证换版只能由维护控制器在保存旧 plist/规则快照后显式调用 `rotate`：
+
+```sh
+/usr/bin/python3 "$HOME/Library/Application Support/Mars Item Guardian/guardian.py" \
+  rotate local.example.worker --target /absolute/new-release/bin/python \
+  --source /absolute/new-release/src/main.py \
+  --working-directory /absolute/new-release --apply
+```
+
+此操作不启动或停止服务，不修改其他规则，也不会自动授权新来源。先校验当前规则和原包装器，再生成并签名新的版本化包装器；写规则或启动项失败时按条件恢复旧内容。相同版本重复执行不改文件。维护控制器仍须在实际重载前核对候选、活动连接和回滚快照，在新进程、用途规则、监听端口及业务请求都验证后才宣称换版；重载失败须使用保存的旧证据回切，不得只看 `/health`。
 
 恢复指定服务的原入口字段并停用该自动规则（保留后续无关字段变化）：
 

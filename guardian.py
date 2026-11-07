@@ -297,6 +297,9 @@ def main():
     sub=a.add_subparsers(dest='action',required=True); sub.add_parser('scan')
     approve=sub.add_parser('approve');approve.add_argument('plist',type=P);approve.add_argument('name');approve.add_argument('--source',type=P,action='append',required=True)
     restore=sub.add_parser('restore');restore.add_argument('label')
+    rotate=sub.add_parser('rotate');rotate.add_argument('label');rotate.add_argument('--target',type=P,required=True)
+    rotate.add_argument('--source',type=P,action='append',required=True)
+    rotate.add_argument('--working-directory',type=P,required=True);rotate.add_argument('--apply',action='store_true')
     r=sub.add_parser('register'); r.add_argument('manifest'); r.add_argument('--apply',action='store_true')
     args=a.parse_args()
     if args.action=='scan': scan_once(args.base)
@@ -304,6 +307,7 @@ def main():
     else:
         import normalizer
         if args.action=='approve': result=normalizer.enroll_rule(args.base,args.plist,args.name,args.source)
+        elif args.action=='rotate': result=normalizer.rotate_rule(args.base,args.label,args.target,args.source,args.working_directory,home=HOME,apply=args.apply)
         else: result=normalizer.restore(args.base,args.label)
         print(json.dumps(result,ensure_ascii=False,indent=2))
 if __name__=='__main__': main()

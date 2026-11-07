@@ -130,6 +130,82 @@ def enroll_rule(base, plist, name, sources, home=None, original_target=None):
         rules.append(rule); save(root/'rules.json',rules)
         return rule
 
+def rotate_rule(base, label, new_target, sources, working_directory, home=None, apply=False):
+    """Explicitly replace one pinned launch target without dropping its purpose wrapper.
+
+    The caller owns service stop/start and keeps its old plist/rule snapshot for
+    rollback. A failed rotation never starts a process or rewrites another rule.
+    """
+    if apply is not True: raise Protected('target rotation requires explicit apply')
+    home=Path(home or Path.home());root=store(base)
+    new_target=Path(new_target);working_directory=Path(working_directory)
+    if not new_target.is_absolute() or not working_directory.is_absolute() or not working_directory.is_dir() or working_directory.is_symlink():
+        raise Protected('new target and working directory must be absolute and available')
+    if not sources or any(not Path(path).is_absolute() for path in sources):
+        raise Protected('explicit absolute source evidence is required')
+    if any('\n' in str(path) or '\r' in str(path) for path in (new_target,working_directory,*sources)):
+        raise Protected('newline in target provenance')
+    if new_target.name.lower() in ['codex','claude'] or 'Mars Background Items' in new_target.parts or root in new_target.parents:
+        raise Protected('wrapper or background AI CLI is not a valid target')
+    target_pin=file_pin(new_target)
+    source_pins=[file_pin(Path(path)) for path in sources]
+    with open(root/'apply.lock','a') as apply_lock, open(root/'rules.lock','a') as rules_lock:
+        fcntl.flock(apply_lock,fcntl.LOCK_EX)
+        fcntl.flock(rules_lock,fcntl.LOCK_EX)
+        rules=load_rules(base)
+        positions=[i for i,rule in enumerate(rules) if rule.get('label')==label]
+        if len(positions)!=1: raise Protected('expected one enrolled purpose rule')
+        position=positions[0];rule=rules[position]
+        if rule.get('enabled') is not True: raise Protected('purpose rule is disabled')
+        path=Path(rule['plist']);raw,d,st=checked_config(path,home)
+        verify_identity(rule,d)
+        if target_of(d)!=rule['wrapper'] or d['ProgramArguments'][0]!=rule['wrapper']:
+            raise Protected('current launcher is not the pinned purpose wrapper')
+        ensure_wrapper(base,rule)
+        if (str(new_target)==rule['target'] and target_pin==rule['target_pin']
+                and source_pins==rule['source_pins'] and d.get('WorkingDirectory')==str(working_directory)):
+            return {'label':label,'status':'already_current','wrapper':rule['wrapper']}
+        token=sha((label+'\0'+rule['name']+'\0'+str(new_target)).encode())[:20]
+        wrapper=root/'wrappers'/token/(rule['name']+'.app')/'Contents/MacOS'/rule['name']
+        if new_target.resolve()==wrapper.resolve(): raise Protected('new wrapper cannot target itself')
+        new_rule=copy.deepcopy(rule)
+        new_rule.update(target=str(new_target),target_pin=target_pin,source_pins=source_pins,
+                        approved_entry=str(new_target),wrapper=str(wrapper),rotated_at=now())
+        original_metadata=copy.deepcopy(rule['original_metadata'])
+        original_metadata.update(Program=str(new_target),argv0=str(new_target))
+        new_rule['original_metadata']=original_metadata
+        ensure_wrapper(base,new_rule)
+        identifier=plistlib.loads((wrapper.parent.parent/'Info.plist').read_bytes())['CFBundleIdentifier']
+        desired=copy.deepcopy(d)
+        desired['Program']=str(wrapper)
+        desired['ProgramArguments'][0]=str(wrapper)
+        desired['AssociatedBundleIdentifiers']=[identifier]
+        desired['WorkingDirectory']=str(working_directory)
+        new_rule['behavior_sha256']=behavioral_hash(desired)
+        verify_identity(new_rule,desired)
+        old_rules=copy.deepcopy(rules)
+        rules[position]=new_rule
+        committed=False
+        try:
+            commit_config(path,raw,st,desired);committed=True
+            if plistlib.loads(path.read_bytes())!=desired:
+                raise Protected('rotated launch configuration failed verification')
+            save(root/'rules.json',rules)
+        except Exception:
+            if committed:
+                current=path.read_bytes()
+                if plistlib.loads(current)!=desired:
+                    raise Protected('rotated launch configuration changed concurrently; preserving latest state')
+                commit_config(path,current,path.lstat(),d)
+            current_rules=load_rules(base)
+            if current_rules==rules:
+                save(root/'rules.json',old_rules)
+            elif current_rules!=old_rules:
+                raise Protected('purpose rules changed concurrently; preserving latest state')
+            raise
+        return {'label':label,'status':'rotated','previous_target':rule['target'],
+                'previous_wrapper':rule['wrapper'],'wrapper':str(wrapper)}
+
 def run_checked(args):
     result = subprocess.run(args,stdout=subprocess.PIPE,stderr=subprocess.PIPE,timeout=15)
     if result.returncode: raise Protected('wrapper verification or signing failed')

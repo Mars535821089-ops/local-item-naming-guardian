@@ -1,10 +1,13 @@
 import copy
+import contextlib
+import io
 import json
 import os
 from pathlib import Path
 import plistlib
 import shutil
 import subprocess
+import sys
 import tempfile
 import unittest
 from unittest.mock import patch
@@ -48,6 +51,76 @@ class NormalizeSafety(unittest.TestCase):
         self.assertEqual(self.normalize()[0]['status'],'already_normalized')
         self.assertEqual(self.plist.read_bytes(),before)
         self.assertEqual(n.load_rules(self.base)[0]['target'],'/usr/bin/true')
+    def test_explicit_version_rotation_preserves_settings_and_signed_rollback_wrapper(self):
+        old=self.rule();self.normalize();old_entry=Path(old['wrapper'])
+        newtarget=self.home/'new-release'/'bin'/'python';newtarget.parent.mkdir(parents=True)
+        shutil.copyfile('/usr/bin/true',newtarget);newtarget.chmod(0o700)
+        newsource=self.home/'new-release'/'main.py';newsource.write_text('"""New verified source."""\n')
+        before=plistlib.loads(self.plist.read_bytes())
+        result=n.rotate_rule(self.base,'local.test.worker',newtarget,[newsource],newtarget.parent.parent,
+                             home=self.home,apply=True)
+        self.assertEqual(result['status'],'rotated')
+        rule=n.load_rules(self.base)[0];after=plistlib.loads(self.plist.read_bytes())
+        self.assertEqual(rule['target'],str(newtarget))
+        self.assertEqual(after['Program'],rule['wrapper'])
+        self.assertEqual(after['ProgramArguments'][0],rule['wrapper'])
+        self.assertEqual(after['WorkingDirectory'],str(newtarget.parent.parent))
+        self.assertEqual(after['EnvironmentVariables'],before['EnvironmentVariables'])
+        self.assertEqual(after['ProgramArguments'][1:],before['ProgramArguments'][1:])
+        self.assertTrue(old_entry.is_file())
+        subprocess.run(['codesign','--verify','--strict',str(old_entry.parent.parent.parent)],check=True)
+        self.assertEqual(self.normalize()[0]['status'],'already_normalized')
+        snapshot=self.plist.read_bytes()
+        self.assertEqual(n.rotate_rule(self.base,'local.test.worker',newtarget,[newsource],newtarget.parent.parent,
+                                       home=self.home,apply=True)['status'],'already_current')
+        self.assertEqual(self.plist.read_bytes(),snapshot)
+        n.rotate_rule(self.base,'local.test.worker',Path('/usr/bin/true'),[self.source],self.home,
+                      home=self.home,apply=True)
+        self.assertEqual(plistlib.loads(self.plist.read_bytes())['Program'],str(old_entry))
+        self.assertEqual(self.normalize()[0]['status'],'already_normalized')
+    def test_rotation_fails_closed_when_current_pinned_source_changed(self):
+        self.rule();self.normalize();old_config=self.plist.read_bytes()
+        self.source.write_text('"""Changed without approval."""\n')
+        newtarget=self.home/'new-python';shutil.copyfile('/usr/bin/true',newtarget)
+        with self.assertRaises(n.Protected):
+            n.rotate_rule(self.base,'local.test.worker',newtarget,[self.source],self.home,
+                          home=self.home,apply=True)
+        self.assertEqual(self.plist.read_bytes(),old_config)
+    def test_rotation_restores_rule_and_plist_if_rule_save_fails_after_commit(self):
+        self.rule();self.normalize();before=self.plist.read_bytes();prior=n.load_rules(self.base)
+        newcwd=self.home/'new-release';newcwd.mkdir()
+        newtarget=newcwd/'python';shutil.copyfile('/usr/bin/true',newtarget)
+        newsource=newcwd/'main.py';newsource.write_text('"""Safe new release."""\n')
+        original_save=n.save;failed=False
+        def save_then_fail(path,value):
+            nonlocal failed
+            original_save(path,value)
+            if Path(path).name=='rules.json' and not failed:
+                failed=True
+                raise OSError('simulated post-commit persistence failure')
+        with patch.object(n,'save',side_effect=save_then_fail):
+            with self.assertRaises(OSError):
+                n.rotate_rule(self.base,'local.test.worker',newtarget,[newsource],newcwd,
+                              home=self.home,apply=True)
+        self.assertEqual(self.plist.read_bytes(),before)
+        self.assertEqual(n.load_rules(self.base),prior)
+        self.assertEqual(self.normalize()[0]['status'],'already_normalized')
+    def test_rotation_cli_requires_explicit_apply_and_preserves_existing_rule(self):
+        import guardian as g
+        self.rule();self.normalize();before=self.plist.read_bytes()
+        work=self.home/'new-release';work.mkdir()
+        exe=work/'python';shutil.copyfile('/usr/bin/true',exe)
+        source=work/'main.py';source.write_text('"""Approved new release."""\n')
+        argv=['guardian.py','--base',str(self.base),'rotate','local.test.worker',
+              '--target',str(exe),'--source',str(source),'--working-directory',str(work)]
+        with patch.object(g,'HOME',self.home),patch.object(sys,'argv',argv),contextlib.redirect_stdout(io.StringIO()):
+            with self.assertRaises(n.Protected):g.main()
+        self.assertEqual(self.plist.read_bytes(),before)
+        out=io.StringIO()
+        with patch.object(g,'HOME',self.home),patch.object(sys,'argv',argv+['--apply']),contextlib.redirect_stdout(out):
+            g.main()
+        self.assertEqual(json.loads(out.getvalue())['status'],'rotated')
+        self.assertEqual(self.normalize()[0]['status'],'already_normalized')
     def test_update_reverting_name_is_automatically_restored(self):
         self.rule();self.normalize();self.plist.write_bytes(plistlib.dumps(self.original))
         self.assertEqual(self.normalize()[0]['status'],'applied')
