@@ -29,7 +29,7 @@ class Safety(unittest.TestCase):
   with tempfile.TemporaryDirectory() as d:
    p=pathlib.Path(d);(p/'Library/LaunchAgents').mkdir(parents=True);base=p/'base';base.mkdir()
    import shutil,subprocess,json
-   shutil.copy2(pathlib.Path(__file__).parent/'launcher',base/'launcher')
+   shutil.copy2(pathlib.Path(__import__('os').environ.get('GUARDIAN_LAUNCHER',str(pathlib.Path(__file__).parent/'launcher'))),base/'launcher')
    manifest=p/'input.json';g.save(manifest,{'name':'系统维护-测试项目-输出安全测试完成标记','purpose':'仅用于验证规范入口的独立测试程序','project':str(p),'executable':'/usr/bin/true'})
    with mock.patch.object(g,'HOME',p):
     g.register(base,str(manifest),True)
@@ -40,3 +40,18 @@ class Safety(unittest.TestCase):
   with tempfile.TemporaryDirectory() as d:
    with self.assertRaises(ValueError):g.validate_registration({'name':'系统维护-测试项目-输出安全测试完成标记','purpose':'仅用于验证规范入口的独立测试程序','project':d,'executable':'/bin/echo','arguments':['--token','fake']})
 if __name__=='__main__':unittest.main()
+
+class AutomaticScan(unittest.TestCase):
+ def test_scan_executes_normalizer_before_collection(self):
+  import os
+  with tempfile.TemporaryDirectory() as d:
+   calls=[];scan=g.Scan()
+   with mock.patch.object(g,'run_automatic_naming',side_effect=lambda base:calls.append('normalize') or []),mock.patch.object(g.Scan,'run',side_effect=lambda:calls.append('collect') or scan):
+    g.scan_once(pathlib.Path(d))
+   self.assertEqual(calls,['normalize','collect'])
+ def test_resolved_historical_item_is_not_a_current_action(self):
+  scan=g.Scan();scan.rows={'启动服务:/x':{'kind':'启动服务','name':'local.x','path':'/x','executable':'/state/用途名称'}}
+  self.assertEqual(g.current_actions(scan,[{'label':'local.x','name':'系统-项目-明确描述服务用途','status':'already_normalized'}]),[])
+ def test_unknown_generic_service_is_current_action(self):
+  scan=g.Scan();scan.rows={'launch':{'kind':'启动服务','name':'local.x','path':str(pathlib.Path.home()/'Library/LaunchAgents/local.x.plist'),'executable':'/usr/bin/python3'},'btm':{'kind':'后台注册','name':'python3','identifier':'8.local.x','path':'file:///x'}}
+  self.assertEqual(g.current_actions(scan,[])[0]['label'],'local.x')

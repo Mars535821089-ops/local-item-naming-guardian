@@ -5,6 +5,7 @@
 #include <stdlib.h>
 #include <string.h>
 int main(int argc,char **argv){
+ (void)argc;
  char own[PATH_MAX],realown[PATH_MAX],target[PATH_MAX],realtarget[PATH_MAX]; uint32_t n=sizeof own;
  if(_NSGetExecutablePath(own,&n)||!realpath(own,realown))return 126;
  char *s=strrchr(own,'/'); if(!s)return 126; *s=0;

@@ -1,5 +1,5 @@
 #!/usr/bin/python3
-"""Local, metadata-only observer. Never edits third-party software or permission stores."""
+"""Local observer and evidence-bound naming for approved user-owned launch services."""
 import argparse, shutil, collections, datetime, fcntl, hashlib, html, json, os, pathlib, plistlib, re, shlex, sqlite3, subprocess, tempfile, time
 P=pathlib.Path
 HOME=P.home()
@@ -165,15 +165,20 @@ def reconcile(scan,old,rules):
 def report(base,state,rules):
     esc=lambda x:html.escape(str(x))
     rows=[]
+    automatic=read(base/'automatic-naming.json',{}).get('results',[])
+    names={x['label']:x['name'] for x in automatic if x['status'] in ['applied','already_normalized']}
     for k,r in state['items'].items():
         rule=rules.get(k)
-        purpose=rule['purpose'] if rule and r==rule['baseline'] else ('归属：'+r['owner'] if r.get('owner') else '尚无已核实用途；保留原项')
+        ident=r.get('identifier','') or ''
+        label=r['name'] if r['kind']=='启动服务' else ident.split('.',1)[1] if ident.startswith(('8.','16.')) else ''
+        purpose=names.get(label) or (rule['purpose'] if rule and r==rule['baseline'] else ('归属：'+r['owner'] if r.get('owner') else '尚无已核实用途；保留原项'))
         rows.append('<tr>'+''.join('<td>'+esc(x)+'</td>' for x in [r['kind'],r['name'],purpose,r.get('path','')])+'</tr>')
     body='''<!doctype html><meta charset="utf-8"><title>本机项目命名管家</title><style>body{font:15px system-ui;margin:32px;background:#f5f6f8;color:#182332}td,th{padding:10px;text-align:left;border-bottom:1px solid #ddd;word-break:break-all}table{width:100%;border-collapse:collapse}input{padding:12px;width:80%}pre{white-space:pre-wrap}</style><h1>本机项目命名管家</h1><p>本地自动核查 · 不上传数据 · 不自动删除 · 不改第三方签名或权限</p>'''
     body+='<p>最近核查（UTC）：'+esc(state['at'])+'；项目 '+str(len(state['items']))+'</p>'
-    body+='<details open><summary>最近变更</summary><pre>'+esc(json.dumps(list(read(base/'待核查.json',{}).values())[-30:],ensure_ascii=False,indent=2))+'</pre></details>'
+    body+='<details open><summary>当前需处理项目（历史变更不计入）</summary><pre>'+esc(json.dumps(list(read(base/'待核查.json',{}).values())[-30:],ensure_ascii=False,indent=2))+'</pre></details>'
+    body+='<details open><summary>自动规范化与系统显示验证</summary><pre>'+esc(json.dumps(read(base/'automatic-naming.json',{}),ensure_ascii=False,indent=2))+'</pre></details>'
     body+='<details><summary>覆盖限制与读取状态</summary><pre>'+esc(json.dumps(read(base/'coverage.json',[]),ensure_ascii=False,indent=2))+'</pre></details>'
-    body+='<p><a href="待核查.json">累计变更记录</a> · <a href="coverage.json">覆盖范围与读取限制</a></p><input id="q" placeholder="搜索名称、用途、来源路径"><table><thead><tr><th>类别</th><th>名称</th><th>用途／归属</th><th>路径</th></tr></thead><tbody>'+''.join(rows)+'</tbody></table>'
+    body+='<p><a href="变更历史.json">累计变更历史</a> · <a href="coverage.json">覆盖范围与读取限制</a></p><input id="q" placeholder="搜索名称、用途、来源路径"><table><thead><tr><th>类别</th><th>名称</th><th>用途／归属</th><th>路径</th></tr></thead><tbody>'+''.join(rows)+'</tbody></table>'
     body+='''<script>document.getElementById('q').oninput=function(){for(const r of document.querySelectorAll('tbody tr'))r.hidden=!r.textContent.toLowerCase().includes(this.value.toLowerCase())}</script>'''
     atomic(base/'项目用途看板.html',body.encode())
 
@@ -187,13 +192,45 @@ def permission_baselines(events,coverage):
         elif source.endswith('com.apple.controlcenter.plist'): prefixes.append('设置存储变更:'+source)
     return [e for e in events if e['kind']=='新增' and any(e['key'].startswith(p) for p in prefixes)]
 
+def run_automatic_naming(base):
+    import normalizer
+    normalizer.process_requests(base)
+    previous=read(base/'automatic-naming.json',{}).get('results',[])
+    return normalizer.normalize(base,refresh_labels=[x['label'] for x in previous if not x.get('display_verified')])
+
+def current_actions(scan, results):
+    actions={}
+    launches={r['name']:r for r in scan.rows.values() if r['kind']=='启动服务'}
+    statuses={r['label']:r for r in results}
+    for result in results:
+        if result['status']=='protected': actions[result['label']]={**result,'resolution':'来源或配置变化，保留原项；不自动重新授权'}
+    for r in scan.rows.values():
+        if r['kind']!='后台注册': continue
+        ident=r.get('identifier') or ''
+        if not ident.startswith(('8.','16.')): continue
+        label=ident.split('.',1)[1];launch=launches.get(label)
+        if not launch: continue
+        local=str(P.home()/'Library/LaunchAgents') in launch['path'] or label.startswith(('com.mars.','local.mars.'))
+        vague=re.fullmatch(r'(?:bash|sh|zsh|csh|python[\d.]*|Python|node|ruby|perl|osascript|exec|cc-switch|[^/]+\.sh)',r['name'])
+        if not local or not vague: continue
+        status=statuses.get(label,{})
+        actions.setdefault(label,{'label':label,'name':r['name'],'path':launch['path'],'status':'awaiting_display' if status.get('status') in ['applied','already_normalized'] else 'needs_evidence','resolution':'启动配置已规范，等待系统显示刷新' if status else '用途未登记或系统服务：保留原项'})
+    return list(actions.values())
+
+def observed_results(scan, results):
+    for r in results:
+        matches=[x for x in scan.rows.values() if x['kind']=='后台注册' and x.get('identifier') in ['8.'+r['label'],'16.'+r['label']]]
+        r['display_verified']=bool(matches) and all(x['name']==r['name'] for x in matches)
+    return results
+
 def scan_once(base):
     base.mkdir(parents=True,exist_ok=True)
     with open(base/'scan.lock','a') as lock:
         try: fcntl.flock(lock,fcntl.LOCK_EX|fcntl.LOCK_NB)
         except BlockingIOError: return
         old=read(base/'state.json',{}); rules=read(base/'rules.json',{})
-        scan=Scan().run(); state={'at':stamp(),'items':scan.rows}
+        automatic=run_automatic_naming(base)
+        scan=Scan().run(); automatic=observed_results(scan,automatic); state={'at':stamp(),'items':scan.rows}
         events=reconcile(scan,old.get('items',{}),rules) if old else []
         # Newly readable protected records after permission changes establish a baseline.
         previous_coverage=read(base/'coverage.json',[])
@@ -202,15 +239,20 @@ def scan_once(base):
         if baseline_events:
             save(base/'permission-baseline.json',{'at':stamp(),'reason':'Previously unreadable source; not evidence of installation','events':baseline_events})
             events=[e for e in events if e not in baseline_events]
-        inbox=read(base/'待核查.json',{})
+        inbox=read(base/'变更历史.json',None)
+        if inbox is None: inbox=read(base/'待核查.json',{})
         for e in events:
             key=digest(json.dumps(e,sort_keys=True,ensure_ascii=False).encode())
             if key not in inbox: inbox[key]={'first_seen':stamp(),**e}
-        save(base/'待核查.json',inbox); save(base/'coverage.json',scan.coverage)
+        save(base/'变更历史.json',inbox)
+        actions=current_actions(scan,automatic)
+        save(base/'待核查.json',{x['label']:x for x in actions})
+        save(base/'automatic-naming.json',{'at':stamp(),'results':automatic})
+        save(base/'coverage.json',scan.coverage)
         save(base/'state.json',state); report(base,state,rules)
         # Background completion evidence contains no project paths or command arguments.
-        save(base/'health.json',{'last_success':state['at'],'items':len(scan.rows),'coverage_gaps':len([c for c in scan.coverage if c['status']!='ok'])})
-        print(json.dumps({'items':len(scan.rows),'new_events':len(events),'pending':len(inbox),'at':state['at']}))
+        save(base/'health.json',{'last_success':state['at'],'items':len(scan.rows),'coverage_gaps':len([c for c in scan.coverage if c['status']!='ok']),'current_actions':len(actions),'auto_managed':len(automatic),'auto_applied':sum(x['status']=='applied' for x in automatic)})
+        print(json.dumps({'items':len(scan.rows),'new_events':len(events),'pending':len(actions),'at':state['at']}))
 
 def validate_registration(d):
     for k in ['name','purpose','project','executable']:
@@ -246,13 +288,22 @@ def register(base,manifest,apply):
         row={'kind':'启动服务','name':label,'path':str(plist),'executable':str(executable),'identity':digest(plist.read_bytes()),'target_present':True}
         rules['启动服务:'+str(plist)]={'baseline':row,'purpose':d['name'],'evidence':'用户通过规范入口登记'}
         save(base/'rules.json',rules)
+        import normalizer
+        normalizer.enroll_rule(base,plist.resolve(),d['name'],[P(d['executable'])],home=HOME.resolve(),original_target=d['executable'])
     print(json.dumps(result,ensure_ascii=False,indent=2))
 
 def main():
     a=argparse.ArgumentParser(); a.add_argument('--base',type=P,default=BASE)
     sub=a.add_subparsers(dest='action',required=True); sub.add_parser('scan')
+    approve=sub.add_parser('approve');approve.add_argument('plist',type=P);approve.add_argument('name');approve.add_argument('--source',type=P,action='append',required=True)
+    restore=sub.add_parser('restore');restore.add_argument('label')
     r=sub.add_parser('register'); r.add_argument('manifest'); r.add_argument('--apply',action='store_true')
     args=a.parse_args()
     if args.action=='scan': scan_once(args.base)
-    else: register(args.base,args.manifest,args.apply)
+    elif args.action=='register': register(args.base,args.manifest,args.apply)
+    else:
+        import normalizer
+        if args.action=='approve': result=normalizer.enroll_rule(args.base,args.plist,args.name,args.source)
+        else: result=normalizer.restore(args.base,args.label)
+        print(json.dumps(result,ensure_ascii=False,indent=2))
 if __name__=='__main__': main()
